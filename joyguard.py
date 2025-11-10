@@ -74,6 +74,14 @@ class Database:
             )
         ''')
         
+        # Таблица для антиспама (время последнего сообщения)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS last_support_time (
+                user_id INTEGER PRIMARY KEY,
+                last_message_time INTEGER NOT NULL
+            )
+        ''')
+        
         conn.commit()
         conn.close()
     
@@ -168,18 +176,47 @@ class Database:
         
         return result[0] if result else None
     
-    def save_support_message(self, user_id: int, message: str):
-        """Сохранить сообщение в тех.поддержку"""
+    def save_support_message(self, user_id, message):
+        """Сохранение сообщения в тех.поддержку"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO support_messages (user_id, message) VALUES (?, ?)",
+            (user_id, message)
+        )
+        conn.commit()
+        conn.close()
+    
+    def can_send_support_message(self, user_id, cooldown_seconds=30):
+        """Проверка, может ли пользователь отправить сообщение (антиспам)"""
+        import time
         conn = self.get_connection()
         cursor = conn.cursor()
         
-        cursor.execute('''
-            INSERT INTO support_messages (user_id, message)
-            VALUES (?, ?)
-        ''', (user_id, message))
+        current_time = int(time.time())
         
+        cursor.execute(
+            "SELECT last_message_time FROM last_support_time WHERE user_id = ?",
+            (user_id,)
+        )
+        result = cursor.fetchone()
+        
+        if result:
+            last_time = result[0]
+            time_passed = current_time - last_time
+            
+            if time_passed < cooldown_seconds:
+                conn.close()
+                return False, cooldown_seconds - time_passed
+        
+        # Обновляем время последнего сообщения
+        cursor.execute(
+            "INSERT OR REPLACE INTO last_support_time (user_id, last_message_time) VALUES (?, ?)",
+            (user_id, current_time)
+        )
         conn.commit()
         conn.close()
+        return True, 0
 
 db = Database()
 
@@ -221,7 +258,7 @@ async def cmd_start(message: types.Message):
     """Обработчик команды /start"""
     if message.chat.type == "private":
         await message.answer(
-            "👋 Добро пожаловать в SpringtrapSilent!\n\n"
+            "👋 Добро пожаловать в JoyGuard!\n\n"
             "Здесь вы можете настроить свой глобальный автоответчик "
             "(он будет использоваться, если вы не указали персональный) "
             "и связаться с тех.поддержкой.",
@@ -229,7 +266,7 @@ async def cmd_start(message: types.Message):
         )
     else:
         await message.answer(
-            "👋 SpringtrapSilent активен!\n\n"
+            "👋 JoyGuard активен!\n\n"
             "📝 Команды:\n"
             "• Ответьте на сообщение пользователя командой 'Спринг стоп' для блокировки\n"
             "• 'Спринг стоп' + текст для установки персонального автоответчика\n"
@@ -406,6 +443,17 @@ async def global_autoresponder_menu(message: types.Message, state: FSMContext):
 @dp.message(BotStates.waiting_global_autoresponder)
 async def save_global_autoresponder(message: types.Message, state: FSMContext):
     """Сохранение глобального автоответчика"""
+    # Проверяем, нажата ли кнопка меню
+    if message.text == "👨‍🔧 Тех.поддержка":
+        await state.clear()
+        await support_menu(message, state)
+        return
+    
+    if message.text == "❓ Помощь":
+        await state.clear()
+        await help_menu(message, state)
+        return
+    
     if message.text == "/cancel":
         await state.clear()
         await message.answer("❌ Отменено.", reply_markup=get_main_keyboard())
@@ -437,9 +485,30 @@ async def support_menu(message: types.Message, state: FSMContext):
 @dp.message(BotStates.waiting_support_message)
 async def save_support_message(message: types.Message, state: FSMContext):
     """Сохранение сообщения в тех.поддержку"""
+    # Проверяем, нажата ли кнопка меню
+    if message.text == "✍️ Глобальный автоответчик":
+        await state.clear()
+        await global_autoresponder_menu(message, state)
+        return
+    
+    if message.text == "❓ Помощь":
+        await state.clear()
+        await help_menu(message, state)
+        return
+    
     if message.text == "/cancel":
         await state.clear()
         await message.answer("❌ Отменено.", reply_markup=get_main_keyboard())
+        return
+    
+    # Проверка антиспама
+    can_send, wait_time = db.can_send_support_message(message.from_user.id, cooldown_seconds=30)
+    if not can_send:
+        await message.answer(
+            f"⏰ Пожалуйста, подождите {wait_time} сек. перед отправкой следующего сообщения.",
+            reply_markup=get_main_keyboard()
+        )
+        await state.clear()
         return
     
     # Сохраняем в БД
@@ -489,7 +558,7 @@ async def help_menu(message: types.Message, state: FSMContext):
     await state.clear()
     
     await message.answer(
-        "❓ Помощь по SpringtrapSilent\n\n"
+        "❓ Помощь по JoyGuard\n\n"
         "📝 Команды в групповых чатах:\n\n"
         "1️⃣ Спринг стоп\n"
         "Ответьте на сообщение пользователя этой командой, чтобы заблокировать/разблокировать ему возможность отвечать на ваши сообщения.\n\n"
