@@ -19,9 +19,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Токен бота
-BOT_TOKEN = os.getenv("BOT_TOKEN") or 8267628338:AAG4vUYpYQUC1e-WoDB_CJWf8PTjw-CInqU
+BOT_TOKEN = os.getenv("BOT_TOKEN") or "8267628338:AAG4vUYpYQUC1e-WoDB_CJWf8PTjw-CInqU"
 # ID администратора для тех.поддержки
-ADMIN_ID = os.getenv("ADMIN_ID") or 1349566013
+ADMIN_ID = os.getenv("ADMIN_ID") or "1349566013"
 
 # Инициализация
 bot = Bot(token=BOT_TOKEN)
