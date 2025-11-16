@@ -2,6 +2,7 @@ import logging
 import asyncio
 import sqlite3
 import os
+import html
 from datetime import datetime
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types, F
@@ -19,7 +20,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Токен бота
-BOT_TOKEN = os.getenv("BOT_TOKEN") or "8267628338:AAG4vUYpYQUC1e-WoDB_CJWf8PTjw-CInqU"
+BOT_TOKEN = os.getenv("BOT_TOKEN") or "8267628338:AAFvYAaXyrClK4s-xYgxY_S4rXANs1GdrZc"
 # ID администратора для тех.поддержки
 ADMIN_ID = os.getenv("ADMIN_ID") or "1349566013"
 
@@ -103,6 +104,18 @@ class Database:
             CREATE TABLE IF NOT EXISTS last_support_time (
                 user_id INTEGER PRIMARY KEY,
                 last_message_time INTEGER NOT NULL
+            )
+        ''')
+
+        # Таблица профилей пользователей (для поиска по username)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_profiles (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                username_lower TEXT UNIQUE,
+                first_name TEXT,
+                last_name TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         
@@ -233,6 +246,11 @@ class Database:
                 "INSERT INTO global_blocks (chat_id, blocker_id, message) VALUES (?, ?, ?)",
                 (chat_id, blocker_id, message)
             )
+            # При новом включении глобального блока удаляем старые исключения
+            cursor.execute(
+                "DELETE FROM global_block_exceptions WHERE chat_id = ? AND blocker_id = ?",
+                (chat_id, blocker_id)
+            )
             conn.commit()
             conn.close()
             return True
@@ -288,6 +306,53 @@ class Database:
         conn.close()
         return result is not None
 
+    def upsert_user_profile(self, user):
+        if user is None:
+            return
+        user_id = getattr(user, "id", None)
+        if user_id is None:
+            return
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        username = getattr(user, "username", None)
+        username_lower = username.lower() if username else None
+        first_name = getattr(user, "first_name", None)
+        last_name = getattr(user, "last_name", None)
+        cursor.execute(
+            """
+            INSERT INTO user_profiles (user_id, username, username_lower, first_name, last_name, updated_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username = excluded.username,
+                username_lower = excluded.username_lower,
+                first_name = excluded.first_name,
+                last_name = excluded.last_name,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (user_id, username, username_lower, first_name, last_name)
+        )
+        conn.commit()
+        conn.close()
+
+    def get_user_by_username(self, username: str):
+        if not username:
+            return None
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT user_id, first_name, username FROM user_profiles WHERE username_lower = ?",
+            (username.lower(),)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            return {
+                "user_id": row[0],
+                "first_name": row[1],
+                "username": row[2]
+            }
+        return None
+
     def can_send_support_message(self, user_id, cooldown_seconds=30):
         """Проверка, может ли пользователь отправить сообщение (антиспам)"""
         import time
@@ -338,6 +403,88 @@ def get_main_keyboard():
         resize_keyboard=True
     )
     return keyboard
+
+
+async def send_temp_answer(message: types.Message, text: str, *, delay: int = 12, **kwargs) -> None:
+    """Отправляет ответ, который автоматически удалится через delay секунд."""
+    sent_message = await message.answer(text, **kwargs)
+
+    async def _delete_later():
+        try:
+            await asyncio.sleep(delay)
+            await sent_message.delete()
+        except Exception as e:
+            logger.debug(f"Не удалось удалить временное сообщение: {e}")
+
+    asyncio.create_task(_delete_later())
+
+
+def record_user_profiles_from_message(message: types.Message):
+    """Сохранить информацию об участвующих пользователях для поиска по username."""
+    if message.from_user:
+        db.upsert_user_profile(message.from_user)
+    if message.reply_to_message and message.reply_to_message.from_user:
+        db.upsert_user_profile(message.reply_to_message.from_user)
+
+
+def extract_mentioned_usernames(message: types.Message) -> list[str]:
+    usernames: list[str] = []
+
+    def _extract_from(text: str | None, entities: list[types.MessageEntity] | None):
+        if not text or not entities:
+            return
+        for entity in entities:
+            if entity.type == "mention":
+                mention_text = text[entity.offset: entity.offset + entity.length]
+                if mention_text.startswith("@"):
+                    usernames.append(mention_text[1:])
+
+    _extract_from(message.text, message.entities)
+    _extract_from(message.caption, message.caption_entities)
+    return usernames
+
+
+def gather_targets_from_message(message: types.Message) -> list[dict]:
+    """Возвращает список пользователей, которых мог адресовать отправитель (ответ или упоминание)."""
+    targets: list[dict] = []
+    seen_ids: set[int] = set()
+
+    def add_target(user_id: int | None, display_name: str | None, username: str | None = None):
+        if not user_id or user_id in seen_ids:
+            return
+        seen_ids.add(user_id)
+        name = display_name or (f"@{username}" if username else f"ID{user_id}")
+        targets.append({"user_id": user_id, "name": name, "username": username})
+
+    # Адресат из ответа
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_user = message.reply_to_message.from_user
+        db.upsert_user_profile(target_user)
+        add_target(target_user.id, target_user.first_name, target_user.username)
+
+    def process_entities(text: str | None, entities: list[types.MessageEntity] | None):
+        if not text or not entities:
+            return
+        for entity in entities:
+            if entity.type == "text_mention" and entity.user:
+                db.upsert_user_profile(entity.user)
+                add_target(entity.user.id, entity.user.first_name, entity.user.username)
+            elif entity.type == "mention":
+                mention_text = text[entity.offset: entity.offset + entity.length]
+                if mention_text.startswith("@"):
+                    username = mention_text[1:]
+                    profile = db.get_user_by_username(username)
+                    if profile:
+                        add_target(
+                            profile["user_id"],
+                            profile.get("first_name"),
+                            profile.get("username")
+                        )
+
+    process_entities(message.text, message.entities)
+    process_entities(message.caption, message.caption_entities)
+
+    return targets
 
 # ==================== Обработчики команд ====================
 
@@ -427,6 +574,8 @@ async def cmd_joy_stop(message: types.Message):
         return
     
     blocker_id = message.from_user.id
+    record_user_profiles_from_message(message)
+    targets = gather_targets_from_message(message)
     text = message.text.strip()
     lines = text.split('\n')
     first_line = lines[0].strip().lower()
@@ -450,15 +599,22 @@ async def cmd_joy_stop(message: types.Message):
                 response = f"🔒 {blocker_name} включил(а) режим 'Спринг стоп все'. Никто не может отвечать на его сообщения."
         else:
             response = f"🔓 {blocker_name} отключил(а) режим 'Спринг стоп все'. Теперь пользователи снова могут отвечать."
-        await message.answer(response)
+        await send_temp_answer(message, response)
         return
 
-    # Обычный режим требует ответа на сообщение
-    if not message.reply_to_message:
-        await message.answer("❌ Ответьте на сообщение пользователя, которого хотите заблокировать/разблокировать.")
+    # Обычный режим требует указать пользователя (ответом или @username)
+    if not targets:
+        await message.answer(
+            "❌ Укажите пользователя: ответьте на его сообщение или добавьте @username в команду.")
         return
 
-    blocked_id = message.reply_to_message.from_user.id
+    target = targets[0]
+    blocked_id = target.get("user_id")
+    blocked_name = target.get("name") or "пользователь"
+
+    if not blocked_id:
+        await message.answer("❌ Не удалось определить пользователя. Убедитесь, что он ранее писал в чате.")
+        return
 
     # Нельзя заблокировать самого себя
     if blocker_id == blocked_id:
@@ -469,7 +625,6 @@ async def cmd_joy_stop(message: types.Message):
     if global_block_enabled:
         allowed = db.toggle_global_block_exception(message.chat.id, blocker_id, blocked_id)
         blocker_name = message.from_user.first_name
-        blocked_name = message.reply_to_message.from_user.first_name
         if allowed:
             response = (
                 f"🔓 {blocker_name} разрешил(а) пользователю {blocked_name} отвечать, даже когда включён режим 'Спринг стоп все'."
@@ -478,7 +633,7 @@ async def cmd_joy_stop(message: types.Message):
             response = (
                 f"🔒 {blocker_name} снова запретил(а) пользователю {blocked_name} отвечать в режиме 'Спринг стоп все'."
             )
-        await message.answer(response)
+        await send_temp_answer(message, response)
         return
 
     # Переключаем блокировку
@@ -490,7 +645,7 @@ async def cmd_joy_stop(message: types.Message):
     )
 
     blocker_name = message.from_user.first_name
-    blocked_name = message.reply_to_message.from_user.first_name
+    blocked_name = target.get("name") or "пользователь"
 
     if is_blocked:
         if personal_message:
@@ -500,72 +655,68 @@ async def cmd_joy_stop(message: types.Message):
     else:
         response = f"🔓 {blocker_name} разрешил(а) пользователю {blocked_name} снова отвечать на свои сообщения."
 
-    response += (
-        "\n\nℹ️ Чтобы заблокировать всех сразу, используйте команду 'Спринг стоп все'. "
-        "Можно добавить персональный текст на новой строке."
-    )
+    await send_temp_answer(message, response)
 
-    await message.answer(response)
-
-@dp.message(F.reply_to_message)
+@dp.message()
 async def check_reply_block(message: types.Message):
-    """Проверка всех ответов на заблокированность"""
-    if message.chat.type == "private":
+    """Проверка сообщений на попытку связаться с пользователем, который ограничил ответы."""
+    if message.chat.type == "private" or not message.from_user:
         return
-    
+
     replier_id = message.from_user.id
-    original_author_id = message.reply_to_message.from_user.id
-    
-    # Проверяем глобальный блок "Спринг стоп все"
-    global_block_enabled, global_block_message = db.get_global_block(message.chat.id, original_author_id)
-    if global_block_enabled:
-        if db.is_global_block_exception(message.chat.id, original_author_id, replier_id):
-            is_blocked = False
-            personal_message = None
-        else:
-            is_blocked = True
+    record_user_profiles_from_message(message)
+    targets = gather_targets_from_message(message)
+
+    if not targets:
+        return
+
+    blocked_target = None
+    blocker_id = None
+    personal_message = None
+
+    for target in targets:
+        target_id = target.get("user_id")
+        if not target_id:
+            continue
+
+        global_block_enabled, global_block_message = db.get_global_block(message.chat.id, target_id)
+        if global_block_enabled and not db.is_global_block_exception(message.chat.id, target_id, replier_id):
+            blocked_target = target
+            blocker_id = target_id
             personal_message = global_block_message
-    else:
-        # Проверяем персональную блокировку
-        is_blocked, personal_message = db.is_blocked(
-            message.chat.id,
-            original_author_id,
-            replier_id
+            break
+
+        is_blocked, personal_msg = db.is_blocked(message.chat.id, target_id, replier_id)
+        if is_blocked:
+            blocked_target = target
+            blocker_id = target_id
+            personal_message = personal_msg
+            break
+
+    if not blocked_target:
+        return
+
+    try:
+        await message.delete()
+
+        autoresponder = personal_message or db.get_global_autoresponder(blocker_id)
+        if not autoresponder:
+            autoresponder = "Пользователь установил ограничение на ответы к своим сообщениям."
+
+        replier_mention = message.from_user.mention_html()
+        target_name = blocked_target.get("name") or "этот пользователь"
+        text = (
+            f"{replier_mention}, {html.escape(target_name)} установил(а) для вас следующий ответ:\n\n"
+            f"\"{html.escape(autoresponder)}\""
         )
-    
-    if is_blocked:
-        try:
-            # Удаляем сообщение заблокированного пользователя
-            await message.delete()
-            
-            # Получаем автоответчик
-            if personal_message:
-                autoresponder = personal_message
-            else:
-                autoresponder = db.get_global_autoresponder(original_author_id)
-                if not autoresponder:
-                    autoresponder = "Пользователь установил ограничение на ответы к своим сообщениям."
-            
-            # Отправляем временное сообщение
-            replier_mention = message.from_user.mention_html()
-            original_author_name = message.reply_to_message.from_user.first_name
-            
-            temp_message = await message.answer(
-                f"{replier_mention}, {original_author_name} установил(а) для вас следующий ответ:\n\n"
-                f"\"{autoresponder}\"",
-                parse_mode="HTML"
-            )
-            
-            # Удаляем временное сообщение через 12 секунд
-            await asyncio.sleep(12)
-            await temp_message.delete()
-            
-        except Exception as e:
-            logger.error(f"Ошибка при обработке заблокированного ответа: {e}")
-            # Если не удалось удалить, отправляем предупреждение админам
-            await message.answer(
-                "⚠️ Не удалось удалить сообщение. Убедитесь, что бот является администратором с правом удаления сообщений."
-            )
+
+        await send_temp_answer(message, text, parse_mode="HTML")
+
+    except Exception as e:
+        logger.error(f"Ошибка при обработке заблокированного сообщения: {e}")
+        await message.answer(
+            "⚠️ Не удалось удалить сообщение. Убедитесь, что бот является администратором с правом удаления сообщений."
+        )
 
 # ==================== Обработчики для личных сообщений ====================
 
