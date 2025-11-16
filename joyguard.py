@@ -74,6 +74,30 @@ class Database:
             )
         ''')
         
+        # Таблица глобальных блокировок ("Спринг стоп все")
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS global_blocks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                blocker_id INTEGER NOT NULL,
+                message TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(chat_id, blocker_id)
+            )
+        ''')
+
+        # Таблица исключений для глобальных блокировок
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS global_block_exceptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                blocker_id INTEGER NOT NULL,
+                allowed_id INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(chat_id, blocker_id, allowed_id)
+            )
+        ''')
+
         # Таблица для антиспама (время последнего сообщения)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS last_support_time (
@@ -187,6 +211,81 @@ class Database:
         conn.commit()
         conn.close()
     
+    def toggle_global_block(self, chat_id, blocker_id, message=None):
+        """Вкл/выкл режима 'Спринг стоп все'"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id FROM global_blocks WHERE chat_id = ? AND blocker_id = ?",
+            (chat_id, blocker_id)
+        )
+        row = cursor.fetchone()
+        if row:
+            cursor.execute(
+                "DELETE FROM global_blocks WHERE chat_id = ? AND blocker_id = ?",
+                (chat_id, blocker_id)
+            )
+            conn.commit()
+            conn.close()
+            return False
+        else:
+            cursor.execute(
+                "INSERT INTO global_blocks (chat_id, blocker_id, message) VALUES (?, ?, ?)",
+                (chat_id, blocker_id, message)
+            )
+            conn.commit()
+            conn.close()
+            return True
+
+    def get_global_block(self, chat_id, blocker_id):
+        """Получаем персональное сообщение глобальной блокировки, если она активна"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT message FROM global_blocks WHERE chat_id = ? AND blocker_id = ?",
+            (chat_id, blocker_id)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None
+
+    def toggle_global_block_exception(self, chat_id, blocker_id, allowed_id):
+        """Тоггл исключения для режима 'Спринг стоп все'"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id FROM global_block_exceptions WHERE chat_id = ? AND blocker_id = ? AND allowed_id = ?",
+            (chat_id, blocker_id, allowed_id)
+        )
+        row = cursor.fetchone()
+        if row:
+            cursor.execute(
+                "DELETE FROM global_block_exceptions WHERE chat_id = ? AND blocker_id = ? AND allowed_id = ?",
+                (chat_id, blocker_id, allowed_id)
+            )
+            conn.commit()
+            conn.close()
+            return False
+        else:
+            cursor.execute(
+                "INSERT INTO global_block_exceptions (chat_id, blocker_id, allowed_id) VALUES (?, ?, ?)",
+                (chat_id, blocker_id, allowed_id)
+            )
+            conn.commit()
+            conn.close()
+            return True
+
+    def is_global_block_exception(self, chat_id, blocker_id, allowed_id):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM global_block_exceptions WHERE chat_id = ? AND blocker_id = ? AND allowed_id = ?",
+            (chat_id, blocker_id, allowed_id)
+        )
+        result = cursor.fetchone()
+        conn.close()
+        return result is not None
+
     def can_send_support_message(self, user_id, cooldown_seconds=30):
         """Проверка, может ли пользователь отправить сообщение (антиспам)"""
         import time
@@ -248,7 +347,8 @@ async def on_bot_added(event: types.ChatMemberUpdated):
         "📝 Доступные команды:\n"
         "• Ответьте на сообщение пользователя командой 'Спринг стоп' для блокировки\n"
         "• 'Спринг стоп' + текст для установки персонального автоответчика\n"
-        "• 'Спринг список' для просмотра блокировок в чате\n\n"
+        "• 'Спринг список' для просмотра блокировок в чате\n"
+        "• 'Спринг стоп все' для включения/выключения режима 'Спринг стоп все'\n\n"
         "⚠️ ВАЖНО: Сделайте бота администратором с правом удаления сообщений!\n\n"
         "💬 Напишите мне в личку для настройки глобального автоответчика."
     )
@@ -259,8 +359,9 @@ async def cmd_start(message: types.Message):
     if message.chat.type == "private":
         await message.answer(
             "👋 Добро пожаловать в SpringtrapSilent!\n\n"
-            "Здесь вы можете настроить свой глобальный автоответчик при персональном муте пользователя "
-            "(он будет использоваться, если вы не указали персональный) ",
+            "Здесь вы можете настроить свой глобальный автоответчик "
+            "(он будет использоваться, если вы не указали персональный) "
+            "и связаться с тех.поддержкой.",
             reply_markup=get_main_keyboard()
         )
     else:
@@ -269,7 +370,8 @@ async def cmd_start(message: types.Message):
             "📝 Команды:\n"
             "• Ответьте на сообщение пользователя командой 'Спринг стоп' для блокировки\n"
             "• 'Спринг стоп' + текст для установки персонального автоответчика\n"
-            "• 'Спринг список' для просмотра блокировок в чате\n\n"
+            "• 'Спринг список' для просмотра блокировок в чате\n"
+            "• 'Спринг стоп все' для включения/выключения режима 'Спринг стоп все'\n\n"
             "⚠️ Бот должен быть администратором с правом удаления сообщений!"
         )
 
@@ -322,28 +424,61 @@ async def cmd_joy_stop(message: types.Message):
         await message.answer("Эта команда работает только в групповых чатах.")
         return
     
-    # Проверяем, что это ответ на сообщение
+    blocker_id = message.from_user.id
+    text = message.text.strip()
+    lines = text.split('\n')
+    first_line = lines[0].strip().lower()
+    personal_message = None
+    if len(lines) > 1:
+        personal_message = '\n'.join(lines[1:]).strip() or None
+
+    # Обработка режима "Спринг стоп все"
+    global_block_message = db.get_global_block(message.chat.id, blocker_id)
+
+    if first_line == "спринг стоп все":
+        enabled = db.toggle_global_block(message.chat.id, blocker_id, personal_message)
+        blocker_name = message.from_user.first_name
+        if enabled:
+            if personal_message:
+                response = (
+                    f"🔒 {blocker_name} включил(а) режим 'Спринг стоп все'. Никто не может отвечать на его сообщения.\n\n"
+                    f"Персональный ответ:\n{personal_message}"
+                )
+            else:
+                response = f"🔒 {blocker_name} включил(а) режим 'Спринг стоп все'. Никто не может отвечать на его сообщения."
+        else:
+            response = f"🔓 {blocker_name} отключил(а) режим 'Спринг стоп все'. Теперь пользователи снова могут отвечать."
+        await message.answer(response)
+        return
+
+    # Обычный режим требует ответа на сообщение
     if not message.reply_to_message:
         await message.answer("❌ Ответьте на сообщение пользователя, которого хотите заблокировать/разблокировать.")
         return
-    
-    blocker_id = message.from_user.id
+
     blocked_id = message.reply_to_message.from_user.id
-    
+
     # Нельзя заблокировать самого себя
     if blocker_id == blocked_id:
         await message.answer("❌ Вы не можете заблокировать самого себя.")
         return
-    
-    # Проверяем, есть ли персональное сообщение
-    text = message.text.strip()
-    lines = text.split('\n')
-    
-    personal_message = None
-    if len(lines) > 1:
-        # Есть персональное сообщение
-        personal_message = '\n'.join(lines[1:]).strip()
-    
+
+    # Если включен "Спринг стоп все", то команда работает как исключение
+    if global_block_message is not None:
+        allowed = db.toggle_global_block_exception(message.chat.id, blocker_id, blocked_id)
+        blocker_name = message.from_user.first_name
+        blocked_name = message.reply_to_message.from_user.first_name
+        if allowed:
+            response = (
+                f"🔓 {blocker_name} разрешил(а) пользователю {blocked_name} отвечать, даже когда включён режим 'Спринг стоп все'."
+            )
+        else:
+            response = (
+                f"🔒 {blocker_name} снова запретил(а) пользователю {blocked_name} отвечать в режиме 'Спринг стоп все'."
+            )
+        await message.answer(response)
+        return
+
     # Переключаем блокировку
     is_blocked = db.toggle_block(
         message.chat.id,
@@ -351,10 +486,10 @@ async def cmd_joy_stop(message: types.Message):
         blocked_id,
         personal_message
     )
-    
+
     blocker_name = message.from_user.first_name
     blocked_name = message.reply_to_message.from_user.first_name
-    
+
     if is_blocked:
         if personal_message:
             response = f"🔒 {blocker_name} запретил(а) пользователю {blocked_name} отвечать на свои сообщения и установил(а) персональный автоответчик."
@@ -362,7 +497,12 @@ async def cmd_joy_stop(message: types.Message):
             response = f"🔒 {blocker_name} запретил(а) пользователю {blocked_name} отвечать на свои сообщения."
     else:
         response = f"🔓 {blocker_name} разрешил(а) пользователю {blocked_name} снова отвечать на свои сообщения."
-    
+
+    response += (
+        "\n\nℹ️ Чтобы заблокировать всех сразу, используйте команду 'Спринг стоп все'. "
+        "Можно добавить персональный текст на новой строке."
+    )
+
     await message.answer(response)
 
 @dp.message(F.reply_to_message)
@@ -374,12 +514,22 @@ async def check_reply_block(message: types.Message):
     replier_id = message.from_user.id
     original_author_id = message.reply_to_message.from_user.id
     
-    # Проверяем, заблокирован ли ответ
-    is_blocked, personal_message = db.is_blocked(
-        message.chat.id,
-        original_author_id,
-        replier_id
-    )
+    # Проверяем глобальный блок "Спринг стоп все"
+    global_block_message = db.get_global_block(message.chat.id, original_author_id)
+    if global_block_message is not None:
+        if db.is_global_block_exception(message.chat.id, original_author_id, replier_id):
+            is_blocked = False
+            personal_message = None
+        else:
+            is_blocked = True
+            personal_message = global_block_message
+    else:
+        # Проверяем персональную блокировку
+        is_blocked, personal_message = db.is_blocked(
+            message.chat.id,
+            original_author_id,
+            replier_id
+        )
     
     if is_blocked:
         try:
@@ -557,10 +707,12 @@ async def help_menu(message: types.Message, state: FSMContext):
     await state.clear()
     
     await message.answer(
-        "❓ Помощь по JoyGuard\n\n"
+        "❓ Помощь по SpringtrapSilent\n\n"
         "📝 Команды в групповых чатах:\n\n"
         "1️⃣ Спринг стоп\n"
         "Ответьте на сообщение пользователя этой командой, чтобы заблокировать/разблокировать ему возможность отвечать на ваши сообщения.\n\n"
+        "1️⃣➕ Спринг стоп все\n"
+        "Останавливает всех: никто не сможет отвечать на ваши сообщения до повторного выключения.\n\n"
         "2️⃣ Спринг стоп + текст\n"
         "Напишите команду 'Спринг стоп' и с новой строки ваш текст автоответчика. "
         "Этот текст будет показываться заблокированному пользователю при попытке ответить вам.\n\n"
