@@ -238,7 +238,7 @@ class Database:
             return True
 
     def get_global_block(self, chat_id, blocker_id):
-        """Получаем персональное сообщение глобальной блокировки, если она активна"""
+        """Возвращает флаг и текст глобальной блокировки"""
         conn = self.get_connection()
         cursor = conn.cursor()
         cursor.execute(
@@ -247,7 +247,9 @@ class Database:
         )
         row = cursor.fetchone()
         conn.close()
-        return row[0] if row else None
+        if row is None:
+            return False, None
+        return True, row[0]
 
     def toggle_global_block_exception(self, chat_id, blocker_id, allowed_id):
         """Тоггл исключения для режима 'Спринг стоп все'"""
@@ -433,7 +435,7 @@ async def cmd_joy_stop(message: types.Message):
         personal_message = '\n'.join(lines[1:]).strip() or None
 
     # Обработка режима "Спринг стоп все"
-    global_block_message = db.get_global_block(message.chat.id, blocker_id)
+    global_block_enabled, global_block_message = db.get_global_block(message.chat.id, blocker_id)
 
     if first_line == "спринг стоп все":
         enabled = db.toggle_global_block(message.chat.id, blocker_id, personal_message)
@@ -464,7 +466,7 @@ async def cmd_joy_stop(message: types.Message):
         return
 
     # Если включен "Спринг стоп все", то команда работает как исключение
-    if global_block_message is not None:
+    if global_block_enabled:
         allowed = db.toggle_global_block_exception(message.chat.id, blocker_id, blocked_id)
         blocker_name = message.from_user.first_name
         blocked_name = message.reply_to_message.from_user.first_name
@@ -515,8 +517,8 @@ async def check_reply_block(message: types.Message):
     original_author_id = message.reply_to_message.from_user.id
     
     # Проверяем глобальный блок "Спринг стоп все"
-    global_block_message = db.get_global_block(message.chat.id, original_author_id)
-    if global_block_message is not None:
+    global_block_enabled, global_block_message = db.get_global_block(message.chat.id, original_author_id)
+    if global_block_enabled:
         if db.is_global_block_exception(message.chat.id, original_author_id, replier_id):
             is_blocked = False
             personal_message = None
