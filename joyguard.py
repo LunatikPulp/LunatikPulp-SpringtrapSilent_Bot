@@ -3,10 +3,12 @@ import asyncio
 import sqlite3
 import os
 import html
+import re
 from datetime import datetime
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart, ChatMemberUpdatedFilter, IS_NOT_MEMBER, IS_MEMBER, CommandObject
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -405,7 +407,7 @@ def get_main_keyboard():
     return keyboard
 
 
-async def send_temp_answer(message: types.Message, text: str, *, delay: int = 12, **kwargs) -> None:
+async def send_temp_answer(message: types.Message, text: str, *, delay: int = 20, **kwargs) -> None:
     """Отправляет ответ, который автоматически удалится через delay секунд."""
     sent_message = await message.answer(text, **kwargs)
 
@@ -448,13 +450,23 @@ def gather_targets_from_message(message: types.Message) -> list[dict]:
     """Возвращает список пользователей, которых мог адресовать отправитель (ответ или упоминание)."""
     targets: list[dict] = []
     seen_ids: set[int] = set()
+    seen_usernames: set[str] = set()
 
     def add_target(user_id: int | None, display_name: str | None, username: str | None = None):
-        if not user_id or user_id in seen_ids:
+        if user_id:
+            if user_id in seen_ids:
+                return
+            seen_ids.add(user_id)
+        elif username:
+            uname = username.lower()
+            if uname in seen_usernames:
+                return
+            seen_usernames.add(uname)
+        else:
             return
-        seen_ids.add(user_id)
-        name = display_name or (f"@{username}" if username else f"ID{user_id}")
-        targets.append({"user_id": user_id, "name": name, "username": username})
+
+        name = display_name or (f"@{username}" if username else (f"ID{user_id}" if user_id else ""))
+        targets.append({"user_id": user_id, "name": name or None, "username": username})
 
     # Адресат из ответа
     if message.reply_to_message and message.reply_to_message.from_user:
@@ -480,11 +492,66 @@ def gather_targets_from_message(message: types.Message) -> list[dict]:
                             profile.get("first_name"),
                             profile.get("username")
                         )
+                    else:
+                        add_target(None, mention_text, username)
 
     process_entities(message.text, message.entities)
     process_entities(message.caption, message.caption_entities)
 
     return targets
+
+
+def remove_target_mentions(text: str, targets: list[dict]) -> str:
+    if not text:
+        return text
+    result = text
+    for target in targets:
+        username = target.get("username")
+        if username:
+            pattern = rf"@{re.escape(username)}\b"
+            result = re.sub(pattern, "", result, flags=re.IGNORECASE)
+    # Удаляем лишние пробелы
+    result = re.sub(r"\s+", " ", result)
+    return result.strip()
+
+
+def extract_personal_message(after_command_text: str, targets: list[dict]) -> str | None:
+    if not after_command_text:
+        return None
+
+    candidate = after_command_text.strip()
+
+    newline_index = candidate.find('\n')
+    if newline_index != -1:
+        candidate = candidate[newline_index + 1:]
+
+    candidate = candidate.lstrip("-—:").strip()
+    candidate = remove_target_mentions(candidate, targets)
+    return candidate or None
+
+
+async def resolve_targets_with_fetch(chat_id: int, targets: list[dict]):
+    for target in targets:
+        if target.get("user_id") or not target.get("username"):
+            continue
+        username = target["username"]
+        resolved_user = None
+
+        username_with_at = username if username.startswith("@") else f"@{username}"
+        try:
+            chat_obj = await bot.get_chat(username_with_at)
+            if chat_obj and getattr(chat_obj, "type", None) == "private":
+                resolved_user = chat_obj
+        except TelegramBadRequest:
+            resolved_user = None
+
+        if resolved_user is None:
+            continue
+
+        target["user_id"] = resolved_user.id
+        target["name"] = resolved_user.first_name or getattr(resolved_user, "full_name", None) or target.get("name") or username_with_at
+        target["username"] = resolved_user.username or username
+        db.upsert_user_profile(resolved_user)
 
 # ==================== Обработчики команд ====================
 
@@ -566,7 +633,7 @@ async def cmd_list(message: types.Message):
     
     await message.answer(text)
 
-@dp.message(F.text.lower().startswith("спринг стоп"))
+@dp.message(F.text.func(lambda text: isinstance(text, str) and "спринг стоп" in text.lower()))
 async def cmd_joy_stop(message: types.Message):
     """Команда 'Спринг стоп' - блокировка/разблокировка"""
     if message.chat.type == "private":
@@ -576,24 +643,29 @@ async def cmd_joy_stop(message: types.Message):
     blocker_id = message.from_user.id
     record_user_profiles_from_message(message)
     targets = gather_targets_from_message(message)
-    text = message.text.strip()
-    lines = text.split('\n')
-    first_line = lines[0].strip().lower()
-    personal_message = None
-    if len(lines) > 1:
-        personal_message = '\n'.join(lines[1:]).strip() or None
+    await resolve_targets_with_fetch(message.chat.id, targets)
+    text = message.text
+    text_lower = text.lower()
+    cmd_pos = text_lower.find("спринг стоп")
+    if cmd_pos == -1:
+        return
+
+    after_command_text = text[cmd_pos + len("спринг стоп"):]
+    tail_lower = text_lower[cmd_pos:].lstrip()
 
     # Обработка режима "Спринг стоп все"
     global_block_enabled, global_block_message = db.get_global_block(message.chat.id, blocker_id)
 
-    if first_line == "спринг стоп все":
-        enabled = db.toggle_global_block(message.chat.id, blocker_id, personal_message)
+    if tail_lower.startswith("спринг стоп все"):
+        remaining_text = text[cmd_pos + len("спринг стоп все"):]
+        global_message = extract_personal_message(remaining_text, targets)
+        enabled = db.toggle_global_block(message.chat.id, blocker_id, global_message)
         blocker_name = message.from_user.first_name
         if enabled:
-            if personal_message:
+            if global_message:
                 response = (
                     f"🔒 {blocker_name} включил(а) режим 'Спринг стоп все'. Никто не может отвечать на его сообщения.\n\n"
-                    f"Персональный ответ:\n{personal_message}"
+                    f"Персональный ответ:\n{global_message}"
                 )
             else:
                 response = f"🔒 {blocker_name} включил(а) режим 'Спринг стоп все'. Никто не может отвечать на его сообщения."
@@ -601,6 +673,8 @@ async def cmd_joy_stop(message: types.Message):
             response = f"🔓 {blocker_name} отключил(а) режим 'Спринг стоп все'. Теперь пользователи снова могут отвечать."
         await send_temp_answer(message, response)
         return
+
+    personal_message = extract_personal_message(after_command_text, targets)
 
     # Обычный режим требует указать пользователя (ответом или @username)
     if not targets:
@@ -657,10 +731,10 @@ async def cmd_joy_stop(message: types.Message):
 
     await send_temp_answer(message, response)
 
-@dp.message()
+@dp.message((F.chat.type == "group") | (F.chat.type == "supergroup"))
 async def check_reply_block(message: types.Message):
     """Проверка сообщений на попытку связаться с пользователем, который ограничил ответы."""
-    if message.chat.type == "private" or not message.from_user:
+    if not message.from_user:
         return
 
     replier_id = message.from_user.id
