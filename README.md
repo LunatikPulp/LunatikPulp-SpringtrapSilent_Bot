@@ -57,6 +57,7 @@ cp .env.example .env
 4. Откройте файл `.env` и вставьте токен вашего бота от [@BotFather](https://t.me/BotFather) и id вашего аккаунта:
 ```
 BOT_TOKEN=1234567890:ABCdefGHIjklMNOpqrsTUVwxyz123456789 (пример)
+
 ADMIN_ID=1234567890 (пример)
 ```
 
