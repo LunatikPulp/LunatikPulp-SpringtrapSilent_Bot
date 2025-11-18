@@ -14,24 +14,24 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
-# Загрузка переменных окружения
+
 load_dotenv()
 
-# Настройка логирования
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Токен бота
-BOT_TOKEN = os.getenv("BOT_TOKEN") or "8267628338:AAFvYAaXyrClK4s-xYgxY_S4rXANs1GdrZc"
-# ID администратора для тех.поддержки
-ADMIN_ID = os.getenv("ADMIN_ID") or "1349566013"
 
-# Инициализация
+BOT_TOKEN = os.getenv("BOT_TOKEN") or 
+
+ADMIN_ID = os.getenv("ADMIN_ID") or 
+
+
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# ==================== База данных ====================
+
 class Database:
     def __init__(self, db_name="joyguard.db"):
         self.db_name = db_name
@@ -45,7 +45,7 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor()
         
-        # Таблица блокировок
+      
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS blocks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,7 +58,7 @@ class Database:
             )
         ''')
         
-        # Таблица глобальных автоответчиков
+        
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS global_autoresponders (
                 user_id INTEGER PRIMARY KEY,
@@ -67,7 +67,7 @@ class Database:
             )
         ''')
         
-        # Таблица для тех.поддержки
+       
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS support_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,7 +77,7 @@ class Database:
             )
         ''')
         
-        # Таблица глобальных блокировок ("Спринг стоп все")
+       
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS global_blocks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -89,7 +89,7 @@ class Database:
             )
         ''')
 
-        # Таблица исключений для глобальных блокировок
+        
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS global_block_exceptions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -101,7 +101,7 @@ class Database:
             )
         ''')
 
-        # Таблица для антиспама (время последнего сообщения)
+        
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS last_support_time (
                 user_id INTEGER PRIMARY KEY,
@@ -109,7 +109,7 @@ class Database:
             )
         ''')
 
-        # Таблица профилей пользователей (для поиска по username)
+      
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS user_profiles (
                 user_id INTEGER PRIMARY KEY,
@@ -129,7 +129,7 @@ class Database:
         conn = self.get_connection()
         cursor = conn.cursor()
         
-        # Проверяем, существует ли блокировка
+       
         cursor.execute('''
             SELECT id FROM blocks 
             WHERE chat_id = ? AND blocker_id = ? AND blocked_id = ?
@@ -138,23 +138,23 @@ class Database:
         existing = cursor.fetchone()
         
         if existing:
-            # Удаляем блокировку
+           
             cursor.execute('''
                 DELETE FROM blocks 
                 WHERE chat_id = ? AND blocker_id = ? AND blocked_id = ?
             ''', (chat_id, blocker_id, blocked_id))
             conn.commit()
             conn.close()
-            return False  # Разблокировано
+            return False  
         else:
-            # Добавляем блокировку
+           
             cursor.execute('''
                 INSERT INTO blocks (chat_id, blocker_id, blocked_id, personal_message)
                 VALUES (?, ?, ?, ?)
             ''', (chat_id, blocker_id, blocked_id, personal_message))
             conn.commit()
             conn.close()
-            return True  # Заблокировано
+            return True  
     
     def is_blocked(self, chat_id: int, blocker_id: int, blocked_id: int):
         """Проверка, заблокирован ли пользователь"""
@@ -170,7 +170,7 @@ class Database:
         conn.close()
         
         if result:
-            return True, result[0]  # Заблокирован, персональное сообщение
+            return True, result[0]  
         return False, None
     
     def get_chat_blocks(self, chat_id: int):
@@ -248,7 +248,7 @@ class Database:
                 "INSERT INTO global_blocks (chat_id, blocker_id, message) VALUES (?, ?, ?)",
                 (chat_id, blocker_id, message)
             )
-            # При новом включении глобального блока удаляем старые исключения
+          
             cursor.execute(
                 "DELETE FROM global_block_exceptions WHERE chat_id = ? AND blocker_id = ?",
                 (chat_id, blocker_id)
@@ -376,8 +376,7 @@ class Database:
             if time_passed < cooldown_seconds:
                 conn.close()
                 return False, cooldown_seconds - time_passed
-        
-        # Обновляем время последнего сообщения
+       
         cursor.execute(
             "INSERT OR REPLACE INTO last_support_time (user_id, last_message_time) VALUES (?, ?)",
             (user_id, current_time)
@@ -388,13 +387,13 @@ class Database:
 
 db = Database()
 
-# ==================== FSM States ====================
+
 class BotStates(StatesGroup):
     waiting_global_autoresponder = State()
     waiting_support_message = State()
     waiting_admin_reply = State()  # Ожидание ответа админа
 
-# ==================== Клавиатуры ====================
+
 def get_main_keyboard():
     """Главная клавиатура в личных сообщениях"""
     keyboard = ReplyKeyboardMarkup(
@@ -468,7 +467,7 @@ def gather_targets_from_message(message: types.Message) -> list[dict]:
         name = display_name or (f"@{username}" if username else (f"ID{user_id}" if user_id else ""))
         targets.append({"user_id": user_id, "name": name or None, "username": username})
 
-    # Адресат из ответа
+   
     if message.reply_to_message and message.reply_to_message.from_user:
         target_user = message.reply_to_message.from_user
         db.upsert_user_profile(target_user)
@@ -510,7 +509,7 @@ def remove_target_mentions(text: str, targets: list[dict]) -> str:
         if username:
             pattern = rf"@{re.escape(username)}\b"
             result = re.sub(pattern, "", result, flags=re.IGNORECASE)
-    # Удаляем лишние пробелы
+   
     result = re.sub(r"\s+", " ", result)
     return result.strip()
 
@@ -553,7 +552,7 @@ async def resolve_targets_with_fetch(chat_id: int, targets: list[dict]):
         target["username"] = resolved_user.username or username
         db.upsert_user_profile(resolved_user)
 
-# ==================== Обработчики команд ====================
+
 
 @dp.my_chat_member(ChatMemberUpdatedFilter(IS_NOT_MEMBER >> IS_MEMBER))
 async def on_bot_added(event: types.ChatMemberUpdated):
@@ -604,14 +603,12 @@ async def cmd_list(message: types.Message):
         await message.answer("📋 В этом чате нет активных блокировок.")
         return
     
-    # Группируем блокировки по блокирующему
     blocks_dict = {}
     for blocker_id, blocked_id in blocks:
         if blocker_id not in blocks_dict:
             blocks_dict[blocker_id] = []
         blocks_dict[blocker_id].append(blocked_id)
     
-    # Формируем сообщение
     text = "📋 Список персональных блокировок в этом чате:\n\n"
     
     for blocker_id, blocked_list in blocks_dict.items():
@@ -653,7 +650,7 @@ async def cmd_joy_stop(message: types.Message):
     after_command_text = text[cmd_pos + len("спринг стоп"):]
     tail_lower = text_lower[cmd_pos:].lstrip()
 
-    # Обработка режима "Спринг стоп все"
+   
     global_block_enabled, global_block_message = db.get_global_block(message.chat.id, blocker_id)
 
     if tail_lower.startswith("спринг стоп все"):
@@ -676,7 +673,6 @@ async def cmd_joy_stop(message: types.Message):
 
     personal_message = extract_personal_message(after_command_text, targets)
 
-    # Обычный режим требует указать пользователя (ответом или @username)
     if not targets:
         await message.answer(
             "❌ Укажите пользователя: ответьте на его сообщение или добавьте @username в команду.")
@@ -690,12 +686,12 @@ async def cmd_joy_stop(message: types.Message):
         await message.answer("❌ Не удалось определить пользователя. Убедитесь, что он ранее писал в чате.")
         return
 
-    # Нельзя заблокировать самого себя
+  
     if blocker_id == blocked_id:
         await message.answer("❌ Вы не можете заблокировать самого себя.")
         return
 
-    # Если включен "Спринг стоп все", то команда работает как исключение
+   
     if global_block_enabled:
         allowed = db.toggle_global_block_exception(message.chat.id, blocker_id, blocked_id)
         blocker_name = message.from_user.first_name
@@ -710,7 +706,7 @@ async def cmd_joy_stop(message: types.Message):
         await send_temp_answer(message, response)
         return
 
-    # Переключаем блокировку
+   
     is_blocked = db.toggle_block(
         message.chat.id,
         blocker_id,
@@ -792,7 +788,7 @@ async def check_reply_block(message: types.Message):
             "⚠️ Не удалось удалить сообщение. Убедитесь, что бот является администратором с правом удаления сообщений."
         )
 
-# ==================== Обработчики для личных сообщений ====================
+
 
 @dp.message(F.text == "✍️ Глобальный автоответчик")
 async def global_autoresponder_menu(message: types.Message, state: FSMContext):
@@ -800,7 +796,7 @@ async def global_autoresponder_menu(message: types.Message, state: FSMContext):
     if message.chat.type != "private":
         return
     
-    # Очищаем любое предыдущее состояние
+   
     await state.clear()
     
     current = db.get_global_autoresponder(message.from_user.id)
@@ -819,7 +815,7 @@ async def global_autoresponder_menu(message: types.Message, state: FSMContext):
 @dp.message(BotStates.waiting_global_autoresponder)
 async def save_global_autoresponder(message: types.Message, state: FSMContext):
     """Сохранение глобального автоответчика"""
-    # Проверяем, нажата ли кнопка меню
+   
     if message.text == "👨‍🔧 Тех.поддержка":
         await state.clear()
         await support_menu(message, state)
@@ -848,7 +844,7 @@ async def support_menu(message: types.Message, state: FSMContext):
     if message.chat.type != "private":
         return
     
-    # Очищаем любое предыдущее состояние
+    
     await state.clear()
     
     await message.answer(
@@ -861,7 +857,7 @@ async def support_menu(message: types.Message, state: FSMContext):
 @dp.message(BotStates.waiting_support_message)
 async def save_support_message(message: types.Message, state: FSMContext):
     """Сохранение сообщения в тех.поддержку"""
-    # Проверяем, нажата ли кнопка меню
+    
     if message.text == "✍️ Глобальный автоответчик":
         await state.clear()
         await global_autoresponder_menu(message, state)
@@ -877,7 +873,7 @@ async def save_support_message(message: types.Message, state: FSMContext):
         await message.answer("❌ Отменено.", reply_markup=get_main_keyboard())
         return
     
-    # Проверка антиспама
+    
     can_send, wait_time = db.can_send_support_message(message.from_user.id, cooldown_seconds=30)
     if not can_send:
         await message.answer(
@@ -887,10 +883,10 @@ async def save_support_message(message: types.Message, state: FSMContext):
         await state.clear()
         return
     
-    # Сохраняем в БД
+    
     db.save_support_message(message.from_user.id, message.text)
     
-    # Отправляем администратору, если ID указан
+    
     if ADMIN_ID:
         try:
             admin_id = int(ADMIN_ID)
@@ -899,7 +895,7 @@ async def save_support_message(message: types.Message, state: FSMContext):
                 user_info += f" (@{message.from_user.username})"
             user_info += f"\nID: {message.from_user.id}"
             
-            # Создаем кнопку "Ответить"
+            
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="💬 Ответить", callback_data=f"reply_{message.from_user.id}")]
             ])
@@ -930,7 +926,7 @@ async def help_menu(message: types.Message, state: FSMContext):
     if message.chat.type != "private":
         return
     
-    # Очищаем состояние при переходе в помощь
+   
     await state.clear()
     
     await message.answer(
@@ -953,20 +949,20 @@ async def help_menu(message: types.Message, state: FSMContext):
         reply_markup=get_main_keyboard()
     )
 
-# ==================== Команды администратора ====================
+
 
 @dp.callback_query(F.data.startswith("reply_"))
 async def admin_reply_button(callback: types.CallbackQuery, state: FSMContext):
     """Обработка нажатия на кнопку 'Ответить'"""
-    # Проверяем, что это администратор
+    
     if not ADMIN_ID or str(callback.from_user.id) != str(ADMIN_ID):
         await callback.answer("У вас нет прав администратора", show_alert=True)
         return
     
-    # Извлекаем ID пользователя
+    
     user_id = int(callback.data.split("_")[1])
     
-    # Сохраняем ID в состоянии
+    
     await state.update_data(reply_to_user_id=user_id)
     await state.set_state(BotStates.waiting_admin_reply)
     
@@ -984,7 +980,7 @@ async def send_admin_reply(message: types.Message, state: FSMContext):
         await message.answer("❌ Отменено.")
         return
     
-    # Получаем ID пользователя
+    
     data = await state.get_data()
     user_id = data.get("reply_to_user_id")
     
@@ -994,7 +990,7 @@ async def send_admin_reply(message: types.Message, state: FSMContext):
         return
     
     try:
-        # Отправляем ответ пользователю
+        
         await bot.send_message(
             user_id,
             f"💬 Ответ от администратора:\n\n{message.text}"
@@ -1011,7 +1007,7 @@ async def send_admin_reply(message: types.Message, state: FSMContext):
     
     await state.clear()
 
-# ==================== Запуск бота ====================
+
 async def main():
     logger.info("Запуск JoyGuard...")
     await dp.start_polling(bot)
