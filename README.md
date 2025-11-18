@@ -58,7 +58,6 @@ cp .env.example .env
 ```
 BOT_TOKEN=1234567890:ABCdefGHIjklMNOpqrsTUVwxyz123456789 (пример)
 ADMIN_ID=1234567890 (пример)
-
 ```
 
 5. Запустите бота:
