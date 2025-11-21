@@ -15,6 +15,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.enums import ContentType
 
+#мур
 # Загрузка переменных окружения
 load_dotenv()
 
