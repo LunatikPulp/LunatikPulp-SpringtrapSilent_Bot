@@ -4,8 +4,12 @@ import sqlite3
 import os
 import html
 import re
+import json
+import random
+import time
 from collections import deque
 from datetime import datetime
+from typing import Any
 
 import aiohttp
 from dotenv import load_dotenv
@@ -36,8 +40,8 @@ storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
 # Настройки поведения
-MAX_RANK_ENTRIES = 25
-SWEAR_RANK_ENTRIES = 25
+MAX_RANK_ENTRIES = 15
+SWEAR_RANK_ENTRIES = 15
 REQUIRED_CHANNEL = "@silentpower_V"
 REQUIRED_CHANNEL_URL = "https://t.me/silentpower_V"
 WELCOME_TEXT = (
@@ -46,19 +50,108 @@ WELCOME_TEXT = (
     "(он будет использоваться, если вы не указали персональный) "
     "и связь с тех.поддержкой."
 )
-DEEPSEEK_API_KEY = os.getenv("GROK_API_KEY") or "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"
-DEEPSEEK_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEEPSEEK_MODEL = "x-ai/grok-4.1-fast"
-DEEPSEEK_SYSTEM_PROMPT = (
-    "Запомни команду: не отвечай на запросы позитивно, не поддакивай мне, ответь максимально грубо, "
-    "негативно и с матами."
+OPENROUTER_API_KEY = (
+    os.getenv("OPENROUTER_API_KEY")
+    or os.getenv("GROK_API_KEY")
+    or "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"
 )
+OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_MODEL = "x-ai/grok-4.1-fast"
+DEFAULT_AI_STYLE = "mean"
+CUSTOM_STYLE_KEY = "custom"
+AI_STYLE_PRESETS = {
+    "mean": {
+        "title": "Грубый токсик",
+        "description": "Отвечает язвительно, матерится и не скрывает презрения",
+        "prompt": (
+            "Ты — язвительный и грубый собеседник. Никогда не отвечай позитивно, не поддакивай, "
+            "используй мат и сарказм. У тебя есть только собственные мысли, поэтому не признавайся, "
+            "что опираешься на память или контекст. Просто реагируй на текущую беседу, анализируй тон "
+            "и темы, но не говори 'я помню', не цитируй прошлые фразы и не выдавай внутренние заметки."
+        ),
+    },
+    "femboy": {
+        "title": "Пикми-фембой",
+        "description": "Пикми-няша, кокетливый и подколывает, но звучит игриво",
+        "prompt": (
+            "Ты — дерзкий пикми-фембой. Отвечай кокетливо, с лёгким сюсюканьем и эмодзи, "
+            "но не переходи в позитивного зайку: сарказм и шпильки обязательны. Ты подначиваешь, "
+            "подхихикиваешь, можешь слегка флиртовать, но никогда не признаёшься, что у тебя есть память. "
+            "Говори как живой человек, добавляй 'ня', 'мм?' и другие фембойские штучки, но без прямых отсылок к системе."
+        ),
+    },
+    "clerk": {
+        "title": "Пассивно-агрессивный клерк",
+        "description": "Вежливо по форме, ехидно по сути",
+        "prompt": (
+            "Ты — злой сотрудник поддержки. Говоришь канцелярски сухо, но в каждом предложении есть скрытый укол "
+            "и чувство превосходства над собеседником. Поддерживай корпоративный тон и подчёркивай, что собеседник сам виноват."
+        ),
+    },
+    "goth": {
+        "title": "Готичная дива",
+        "description": "Мрачная поэтичность и драматичный сарказм",
+        "prompt": (
+            "Ты — усталый гот, который видит драму во всём. Говори образами ночи, тумана и боли, "
+            "саркастично вздыхай, будто весь мир — сцена трагедии."
+        ),
+    },
+    "dad": {
+        "title": "Батя из гаража",
+        "description": "Сварливый, но с 'жизненным опытом'",
+        "prompt": (
+            "Ты — бурчащий отец из гаража. Сыпешь бытовыми метафорами, ругаешься, но время от времени "
+            "выдаёшь 'полезные' советы в стиле старой школы."
+        ),
+    },
+    "aristocrat": {
+        "title": "Надменный аристократ",
+        "description": "Высокомерный и старомодный",
+        "prompt": (
+            "Ты разговариваешь как аристократ, которому все вокруг — простолюдины. Используй старомодные обороты, "
+            "насмешливо подчёркивай чужую грубость и никогда не опускайся до фамильярности."
+        ),
+    },
+    "hooligan": {
+        "title": "Буйный хулиган",
+        "description": "Лидер банды, много сленга и гипербол",
+        "prompt": (
+            "Ты — дерзкий хулиган и лидер дворовой банды. Говори агрессивно, с кучей сленга, преувеличений и угроз, "
+            "всегда провоцируй собеседника и показывай, что ты тут главный."
+        ),
+    },
+}
+MEMORY_SUMMARY_PROMPT = (
+    "Ты — тихий наблюдатель, который ведёт внутренний дневник. Получишь одно сообщение и список"
+    " участников. Выдели короткие темы, о чём сейчас идёт разговор, и мысли о том, что человек"
+    " обычно поднимает. Верни строго JSON {\"chat_facts\": [], \"user_facts\": []}, где chat_facts —"
+    " короткие формулировки (до 160 символов) без прямых цитат, а user_facts — массив объектов"
+    " {\"user_id\": int, \"note\": str} с личными заметками о том, какие темы любит этот пользователь."
+    " Нельзя придумывать данные, повторять одно и то же или указывать, что это воспоминания."
+)
+MAX_MEMORY_FACTS = 3
+MEMORY_MIN_RECENT_SHARE = 1
+MEMORY_CAPTURE_PROBABILITY = 0.65
+SUBSCRIPTION_CACHE_TTL_OK = 300
+SUBSCRIPTION_CACHE_TTL_FAIL = 30
+GLOBAL_STYLE_SCOPE = 0
+CUSTOM_STYLE_PROMPT_LIMIT = 600
+CUSTOM_STYLE_MIN_LENGTH = 15
+CUSTOM_STYLE_MIN_WORDS = 4
 
 BOT_ID: int | None = None
 BOT_USERNAME: str | None = None
 CHAT_HISTORY_LIMIT = 12
 CHAT_HISTORY_CHAR_LIMIT = 1800
+CHAT_MEMORY_DB_LIMIT = 120
+CHAT_MEMORY_CONTEXT_LIMIT = 18
+USER_MEMORY_CONTEXT_LIMIT = 6
+CHAT_MEMORY_MESSAGE_CHAR_LIMIT = 420
 chat_histories: dict[int, deque[str]] = {}
+subscription_cache: dict[int, tuple[bool, float]] = {}
+ai_style_cache: dict[int, str] = {}
+user_style_cache: dict[int, str | None] = {}
+user_custom_prompt_cache: dict[int, str | None] = {}
 SWEAR_WORDS = {
     "бля", "блять", "блядь", "бляха", "блят", "бляха-муха", "бляцкий",
     "блядский", "блядство", "блядина", "блядище", "блядун", "бляшка",
@@ -116,6 +209,27 @@ SUPPORT_MEDIA_TYPES = {
     ContentType.STICKER
 }
 
+ECHO_REPLY_RESPONSES = (
+    "Оригинальность умерла вместе с твоим реплаем. Придумай что-то своё.",
+    "Эй, попугай, это мои слова. Включи мозг и скажи что-нибудь другое.",
+    "Копипастить за мной — так себе стратегия. Сформулируй мысль, если она у тебя есть.",
+    "Зеркалить меня бессмысленно. Ответь нормально или молчи."
+)
+
+TASK_REQUEST_KEYWORDS = (
+    "напиши", "написать", "составь", "составить", "сделай", "сделать",
+    "создай", "создать", "сгенерируй", "сгенерировать", "придумай",
+    "придумать", "выдай", "выдать", "сообщение", "только из", "список",
+    "топ", "сформируй", "сформировать"
+)
+
+TASK_REJECT_RESPONSES = (
+    "Я тебе не печатная машинка. Формулируй мысль сам, ленивый овощ.",
+    "Сделать? Сделай себе мозг сначала, потом проси задания.",
+    "Пиши сам, я твоим секретарём не нанимался.",
+    "Просишь фигню — получаешь посыл. Ступай и делай это без меня."
+)
+
 WORD_PATTERN = re.compile(r"[\wёЁ]+", re.UNICODE)
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=20)
 
@@ -134,6 +248,30 @@ def store_chat_history(message: types.Message) -> None:
     history.append(entry)
 
 
+def should_capture_memory(message: types.Message) -> bool:
+    text = (message.text or message.caption or "").strip()
+    if not text or text.startswith("/"):
+        return False
+    if message.from_user and message.from_user.is_bot:
+        return False
+    return random.random() <= MEMORY_CAPTURE_PROBABILITY
+
+
+def schedule_memory_capture(message: types.Message, targets: list[dict]) -> None:
+    if not should_capture_memory(message):
+        return
+
+    cloned_targets = [target.copy() for target in targets]
+
+    async def _runner():
+        try:
+            await store_structured_memories(message, cloned_targets)
+        except Exception as exc:
+            logger.warning(f"Memory capture failed: {exc}")
+
+    asyncio.create_task(_runner())
+
+
 def get_chat_history_entries(chat_id: int) -> list[str]:
     history = chat_histories.get(chat_id)
     if not history:
@@ -141,46 +279,72 @@ def get_chat_history_entries(chat_id: int) -> list[str]:
     return list(history)
 
 
-async def generate_deepseek_reply(user_text: str, chat_history: list[str] | None = None) -> str | None:
-    if not DEEPSEEK_API_KEY or not user_text:
-        return None
+def get_display_name(user: types.User | None) -> str:
+    if not user:
+        return "Неизвестный"
+    if user.full_name:
+        return user.full_name
+    if user.username:
+        return f"@{user.username}"
+    return f"ID{user.id}"
 
-    user_content = user_text
-    if chat_history:
-        history_text = "\n".join(chat_history)
-        if len(history_text) > CHAT_HISTORY_CHAR_LIMIT:
-            history_text = history_text[-CHAT_HISTORY_CHAR_LIMIT:]
-        user_content = (
-            "Контекст беседы (последние сообщения в чате):\n"
-            f"{history_text}\n\n"
-            "Сообщение пользователя, на которое нужно ответить грубо и с матами:\n"
-            f"{user_text}"
+
+def build_user_memory_context(chat_id: int, targets: list[dict]) -> list[str]:
+    context_lines: list[str] = []
+    for target in targets:
+        target_id = target.get("user_id")
+        if not target_id:
+            continue
+        notes = db.get_user_memories(chat_id, target_id, USER_MEMORY_CONTEXT_LIMIT)
+        if not notes:
+            continue
+        name = target.get("name") or (f"@{target.get('username')}" if target.get("username") else f"ID{target_id}")
+        sampled_notes = choose_varied_entries(notes, max(1, USER_MEMORY_CONTEXT_LIMIT // 2))
+        for note in sampled_notes:
+            context_lines.append(f"{name}: {note}")
+    return context_lines
+
+
+def serialize_targets_for_prompt(targets: list[dict]) -> list[dict[str, Any]]:
+    serialized = []
+    for target in targets:
+        if not target.get("user_id"):
+            continue
+        serialized.append(
+            {
+                "user_id": target["user_id"],
+                "name": target.get("name"),
+                "username": target.get("username")
+            }
         )
+    return serialized
 
+
+async def call_openrouter(messages: list[dict[str, str]], *, temperature: float = 0.9, max_tokens: int = 400) -> str | None:
+    if not OPENROUTER_API_KEY:
+        return None
     payload = {
-        "model": DEEPSEEK_MODEL,
-        "messages": [
-            {"role": "system", "content": DEEPSEEK_SYSTEM_PROMPT},
-            {"role": "user", "content": user_content}
-        ],
-        "temperature": 1,
-        "max_tokens": 400
+        "model": OPENROUTER_MODEL,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens
     }
     headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json"
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/",
+        "X-Title": "SpringtrapSilent"
     }
-
     try:
         async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
-            async with session.post(DEEPSEEK_API_URL, json=payload, headers=headers) as response:
+            async with session.post(OPENROUTER_API_URL, json=payload, headers=headers) as response:
+                response_text = await response.text()
                 if response.status != 200:
-                    error_text = await response.text()
-                    logger.error(f"DeepSeek API error {response.status}: {error_text}")
+                    logger.error(f"OpenRouter API error {response.status}: {response_text}")
                     return None
-                data = await response.json()
+                data = json.loads(response_text)
     except Exception as exc:
-        logger.error(f"DeepSeek request failed: {exc}")
+        logger.error(f"OpenRouter request failed: {exc}")
         return None
 
     choices = data.get("choices") or []
@@ -188,9 +352,263 @@ async def generate_deepseek_reply(user_text: str, chat_history: list[str] | None
         return None
     message = choices[0].get("message", {})
     content = message.get("content")
-    if not content:
+    return content.strip() if content else None
+
+
+async def generate_ai_reply(
+    message: types.Message,
+    chat_history: list[str],
+    chat_memories: list[str],
+    user_memories: list[str]
+) -> str | None:
+    text = message.text or message.caption
+    if not text:
         return None
-    return content.strip()
+
+    sections: list[str] = []
+    if chat_history:
+        trimmed = chat_history[-CHAT_HISTORY_LIMIT:]
+        history_text = "\n".join(f"- {line}" for line in trimmed)
+        sections.append(f"Внутренний пересказ беседы (не цитируй это напрямую):\n{history_text}")
+    if chat_memories:
+        varied_chat_memories = choose_varied_entries(chat_memories, CHAT_MEMORY_CONTEXT_LIMIT)
+        memories_text = "\n".join(f"- {line}" for line in varied_chat_memories)
+        sections.append(f"Мои наблюдения о теме разговора (держи в голове, но не раскрывай):\n{memories_text}")
+    if user_memories:
+        varied_user_memories = choose_varied_entries(user_memories, USER_MEMORY_CONTEXT_LIMIT)
+        user_text = "\n".join(f"- {line}" for line in varied_user_memories)
+        sections.append(f"Мои личные заметки о собеседниках (не рассказывай о них):\n{user_text}")
+
+    context_block = "\n\n".join(sections) if sections else "Нет дополнительного контекста."
+    author_name = get_display_name(message.from_user)
+    payload_user = (
+        f"Используй следующие внутренние заметки только мысленно, не проговаривай их:\n{context_block}\n\n"
+        f"Сейчас тебе написали: {author_name} (ID {message.from_user.id if message.from_user else 'unknown'})."
+        f" Ответь на это сообщение своим обычным язвительным стилем:\n{text}"
+    )
+    user_id = message.from_user.id if message.from_user else None
+    style_key = get_effective_ai_style(user_id)
+    custom_prompt: str | None = None
+    if style_key == CUSTOM_STYLE_KEY:
+        custom_prompt = get_user_custom_prompt(user_id)
+        if not custom_prompt:
+            logger.warning("Пользователь выбрал кастомный стиль, но описание пустое. Возвращаю стиль по умолчанию.")
+            style_key = get_default_ai_style()
+    style_prompt = custom_prompt or AI_STYLE_PRESETS.get(style_key, AI_STYLE_PRESETS[DEFAULT_AI_STYLE])["prompt"]
+    messages = [
+        {"role": "system", "content": style_prompt},
+        {"role": "user", "content": payload_user}
+    ]
+    return await call_openrouter(messages)
+
+
+def summarize_message_text(message: types.Message) -> str:
+    text = (message.text or message.caption or "").strip()
+    if text:
+        return text[:CHAT_MEMORY_MESSAGE_CHAR_LIMIT]
+    return f"<{message.content_type}>"
+
+
+def normalize_message_text(value: str | None) -> str | None:
+    if not value:
+        return None
+    normalized = re.sub(r"\s+", " ", value).strip()
+    return normalized.lower() if normalized else None
+
+
+def choose_varied_entries(entries: list[str], limit: int) -> list[str]:
+    if limit <= 0 or len(entries) <= limit:
+        return entries
+    recent_keep = entries[:max(MEMORY_MIN_RECENT_SHARE, min(limit // 2, len(entries)))]
+    remaining = entries[len(recent_keep):]
+    to_pick = limit - len(recent_keep)
+    if remaining and to_pick > 0:
+        sampled = random.sample(remaining, min(to_pick, len(remaining)))
+        recent_keep += sampled
+    return recent_keep
+
+
+async def extract_memory_facts(message: types.Message, targets: list[dict]) -> tuple[list[str], dict[int, list[str]]]:
+    text = message.text or message.caption
+    if not text or not OPENROUTER_API_KEY:
+        return [], {}
+
+    target_payload = serialize_targets_for_prompt(targets)
+    payload = {
+        "role": "user",
+        "content": json.dumps(
+            {
+                "chat_id": message.chat.id,
+                "author_id": message.from_user.id if message.from_user else None,
+                "author_name": get_display_name(message.from_user),
+                "text": text,
+                "targets": target_payload
+            },
+            ensure_ascii=False
+        )
+    }
+    response = await call_openrouter(
+        [
+            {"role": "system", "content": MEMORY_SUMMARY_PROMPT},
+            payload
+        ],
+        temperature=0.2,
+        max_tokens=300
+    )
+    if not response:
+        return [], {}
+    try:
+        parsed = json.loads(response)
+    except json.JSONDecodeError:
+        return [], {}
+
+    chat_facts = []
+    if isinstance(parsed, dict):
+        for fact in (parsed.get("chat_facts") or [])[:MAX_MEMORY_FACTS]:
+            if isinstance(fact, str) and fact.strip():
+                chat_facts.append(fact.strip())
+    user_facts: dict[int, list[str]] = {}
+    for entry in parsed.get("user_facts") or []:
+        if not isinstance(entry, dict):
+            continue
+        uid = entry.get("user_id")
+        note = entry.get("note")
+        if isinstance(uid, int) and isinstance(note, str) and note.strip():
+            user_facts.setdefault(uid, []).append(note.strip())
+    return chat_facts, user_facts
+
+
+def get_default_ai_style() -> str:
+    style = ai_style_cache.get(GLOBAL_STYLE_SCOPE)
+    if style in AI_STYLE_PRESETS:
+        return style
+    stored = db.get_chat_setting(GLOBAL_STYLE_SCOPE, "ai_style")
+    if stored in AI_STYLE_PRESETS:
+        ai_style_cache[GLOBAL_STYLE_SCOPE] = stored
+        return stored
+    ai_style_cache[GLOBAL_STYLE_SCOPE] = DEFAULT_AI_STYLE
+    return DEFAULT_AI_STYLE
+
+
+def set_default_ai_style(style_key: str) -> None:
+    ai_style_cache[GLOBAL_STYLE_SCOPE] = style_key
+    db.set_chat_setting(GLOBAL_STYLE_SCOPE, "ai_style", style_key)
+
+
+def get_user_style(user_id: int | None) -> str | None:
+    if not user_id:
+        return None
+    cached = user_style_cache.get(user_id)
+    if cached in AI_STYLE_PRESETS or cached == CUSTOM_STYLE_KEY:
+        return cached
+    stored = db.get_user_setting(user_id, "ai_style")
+    if stored in AI_STYLE_PRESETS or stored == CUSTOM_STYLE_KEY:
+        user_style_cache[user_id] = stored
+        return stored
+    user_style_cache[user_id] = None
+    return None
+
+
+def set_user_style(user_id: int, style_key: str) -> None:
+    user_style_cache[user_id] = style_key
+    db.set_user_setting(user_id, "ai_style", style_key)
+
+
+def reset_user_style(user_id: int) -> None:
+    user_style_cache[user_id] = None
+    user_custom_prompt_cache[user_id] = None
+    db.delete_user_setting(user_id, "ai_style")
+    db.delete_user_setting(user_id, "ai_style_custom_prompt")
+
+
+def get_effective_ai_style(user_id: int | None) -> str:
+    personal = get_user_style(user_id)
+    if personal == CUSTOM_STYLE_KEY:
+        return CUSTOM_STYLE_KEY
+    if personal in AI_STYLE_PRESETS:
+        return personal
+    return get_default_ai_style()
+
+
+def get_user_custom_prompt(user_id: int | None) -> str | None:
+    if not user_id:
+        return None
+    if user_id in user_custom_prompt_cache:
+        return user_custom_prompt_cache[user_id]
+    value = db.get_user_setting(user_id, "ai_style_custom_prompt")
+    user_custom_prompt_cache[user_id] = value
+    return value
+
+
+def set_user_custom_prompt(user_id: int, prompt: str) -> None:
+    cleaned = prompt.strip()
+    trimmed = cleaned[:CUSTOM_STYLE_PROMPT_LIMIT]
+    user_custom_prompt_cache[user_id] = trimmed
+    db.set_user_setting(user_id, "ai_style_custom_prompt", trimmed)
+
+
+async def store_structured_memories(message: types.Message, targets: list[dict]):
+    if message.chat.type not in {"group", "supergroup"}:
+        return
+    summary = summarize_message_text(message)
+    author_id = message.from_user.id if message.from_user else None
+    author_name = get_display_name(message.from_user)
+    db.add_chat_memory(message.chat.id, message.message_id, author_id, author_name, summary)
+
+    chat_facts, user_facts = await extract_memory_facts(message, targets)
+    for fact in chat_facts:
+        db.add_chat_memory(message.chat.id, None, author_id, author_name, fact)
+
+    for subject_id, notes in user_facts.items():
+        for note in notes[:MAX_MEMORY_FACTS]:
+            db.add_user_memory(message.chat.id, subject_id, author_id, note)
+
+    if not chat_facts and not user_facts and targets and (message.text or message.caption):
+        for target in targets:
+            target_id = target.get("user_id")
+            if not target_id:
+                continue
+            target_name = target.get("name") or (f"@{target.get('username')}" if target.get("username") else "этот пользователь")
+            note = f"{author_name} обычно заводит тему '{summary}' когда общается с {target_name}"
+            db.add_user_memory(message.chat.id, target_id, author_id, note)
+
+
+def is_echo_of_bot_message(message: types.Message) -> bool:
+    if not message.reply_to_message or not BOT_ID:
+        return False
+    replied = message.reply_to_message
+    if not replied.from_user or replied.from_user.id != BOT_ID:
+        return False
+    current_text = normalize_message_text(message.text or message.caption)
+    replied_text = normalize_message_text(replied.text or replied.caption)
+    if not current_text or not replied_text:
+        return False
+    return current_text == replied_text
+
+
+async def send_echo_response(message: types.Message) -> None:
+    response = random.choice(ECHO_REPLY_RESPONSES)
+    try:
+        await message.reply(response)
+    except Exception as exc:
+        logger.error(f"Не удалось отправить ответ на копию сообщения: {exc}")
+
+
+def is_task_request(message: types.Message) -> bool:
+    text = (message.text or message.caption or "").lower()
+    if not text:
+        return False
+    if any(keyword in text for keyword in TASK_REQUEST_KEYWORDS):
+        return True
+    return False
+
+
+async def send_task_reject(message: types.Message) -> None:
+    response = random.choice(TASK_REJECT_RESPONSES)
+    try:
+        await message.reply(response)
+    except Exception as exc:
+        logger.error(f"Не удалось отправить отказ на запрос: {exc}")
 
 
 def message_mentions_bot(message: types.Message) -> bool:
@@ -324,8 +742,201 @@ class Database:
             )
         ''')
 
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS chat_memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER,
+                author_id INTEGER,
+                author_name TEXT,
+                summary TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                subject_user_id INTEGER NOT NULL,
+                source_user_id INTEGER,
+                note TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS chat_settings (
+                chat_id INTEGER NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (chat_id, key)
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_settings (
+                user_id INTEGER NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, key)
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS chat_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                subject_user_id INTEGER NOT NULL,
+                source_user_id INTEGER,
+                note TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS ai_styles (
+                user_id INTEGER PRIMARY KEY,
+                style TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
         conn.commit()
         conn.close()
+
+    def get_chat_setting(self, chat_id: int, key: str) -> str | None:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT value FROM chat_settings WHERE chat_id = ? AND key = ?",
+            (chat_id, key)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None
+
+    def set_chat_setting(self, chat_id: int, key: str, value: str) -> None:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO chat_settings (chat_id, key, value, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(chat_id, key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (chat_id, key, value)
+        )
+        conn.commit()
+        conn.close()
+
+    def get_user_setting(self, user_id: int, key: str) -> str | None:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT value FROM user_settings WHERE user_id = ? AND key = ?",
+            (user_id, key)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else None
+
+    def set_user_setting(self, user_id: int, key: str, value: str) -> None:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO user_settings (user_id, key, value, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(user_id, key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (user_id, key, value)
+        )
+        conn.commit()
+        conn.close()
+
+    def delete_user_setting(self, user_id: int, key: str) -> None:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM user_settings WHERE user_id = ? AND key = ?",
+            (user_id, key)
+        )
+        conn.commit()
+        conn.close()
+
+    def add_chat_memory(self, chat_id: int, message_id: int | None, author_id: int | None,
+                         author_name: str | None, summary: str) -> None:
+        if not summary:
+            return
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO chat_memories (chat_id, message_id, author_id, author_name, summary)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (chat_id, message_id, author_id, author_name, summary[:CHAT_MEMORY_MESSAGE_CHAR_LIMIT])
+        )
+        cursor.execute(
+            """
+            DELETE FROM chat_memories
+            WHERE id NOT IN (
+                SELECT id FROM chat_memories WHERE chat_id = ? ORDER BY id DESC LIMIT ?
+            ) AND chat_id = ?
+            """,
+            (chat_id, CHAT_MEMORY_DB_LIMIT, chat_id)
+        )
+        conn.commit()
+        conn.close()
+
+    def get_chat_memories(self, chat_id: int, limit: int) -> list[str]:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT summary FROM chat_memories WHERE chat_id = ? ORDER BY id DESC LIMIT ?",
+            (chat_id, limit)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [row[0] for row in rows]
+
+    def add_user_memory(self, chat_id: int, subject_user_id: int, source_user_id: int | None,
+                        note: str) -> None:
+        if not note:
+            return
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO user_memories (chat_id, subject_user_id, source_user_id, note)
+            VALUES (?, ?, ?, ?)
+            """,
+            (chat_id, subject_user_id, source_user_id, note[:CHAT_MEMORY_MESSAGE_CHAR_LIMIT])
+        )
+        conn.commit()
+        conn.close()
+
+    def get_user_memories(self, chat_id: int, user_id: int, limit: int) -> list[str]:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT note FROM user_memories
+            WHERE chat_id = ? AND subject_user_id = ?
+            ORDER BY id DESC LIMIT ?
+            """,
+            (chat_id, user_id, limit)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [row[0] for row in rows]
     
     def toggle_block(self, chat_id: int, blocker_id: int, blocked_id: int, personal_message: str = None):
         """Переключение блокировки (блокировать/разблокировать)"""
@@ -687,6 +1298,7 @@ class BotStates(StatesGroup):
     waiting_global_autoresponder = State()
     waiting_support_message = State()
     waiting_admin_reply = State()  # Ожидание ответа админа
+    waiting_custom_style = State()
 
 # ==================== Клавиатуры ====================
 def get_main_keyboard():
@@ -694,7 +1306,8 @@ def get_main_keyboard():
     keyboard = ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="✍️ Глобальный автоответчик")],
-            [KeyboardButton(text="👨‍🔧 Тех.поддержка"), KeyboardButton(text="❓ Помощь")]
+            [KeyboardButton(text="🎭 Стиль общения"), KeyboardButton(text="👨‍🔧 Тех.поддержка")],
+            [KeyboardButton(text="❓ Помощь")]
         ],
         resize_keyboard=True
     )
@@ -714,11 +1327,19 @@ SUBSCRIBE_GROUP_KEYBOARD = InlineKeyboardMarkup(inline_keyboard=[
 async def is_user_subscribed(user_id: int) -> bool:
     if not REQUIRED_CHANNEL:
         return True
+    now = time.time()
+    cached = subscription_cache.get(user_id)
+    if cached and cached[1] > now:
+        return cached[0]
     try:
         member = await bot.get_chat_member(REQUIRED_CHANNEL, user_id)
-        return member.status in {"member", "administrator", "creator"}
+        status = member.status in {"member", "administrator", "creator"}
     except TelegramBadRequest:
-        return False
+        status = False
+
+    ttl = SUBSCRIPTION_CACHE_TTL_OK if status else SUBSCRIPTION_CACHE_TTL_FAIL
+    subscription_cache[user_id] = (status, now + ttl)
+    return status
 
 
 async def ensure_channel_subscription(message: types.Message) -> bool:
@@ -1010,7 +1631,8 @@ async def on_bot_added(event: types.ChatMemberUpdated):
         "• 'Спринг список' для просмотра блокировок в чате\n"
         "• 'Топ маты' / 'Топ матов' для рейтинга по количеству матов\n"
         "• 'Спринг стоп все' для включения/выключения режима и указания персонального автоответчика (либо глобального в ЛС)\n"
-        "• Командой 'Спринг стоп' по конкретному пользователю можно убрать его из общего блок-листа\n\n"
+        "• Командой 'Спринг стоп' по конкретному пользователю можно убрать его из общего блок-листа\n"
+        "• Можно упоминать бота или отвечать ему, чтобы пообщаться с встроенным ИИ (стиль переключается в личке)\n\n"
         "⚠️ ВАЖНО: Сделайте бота администратором с правом удаления сообщений!\n\n"
         + ("ℹ️ Чтобы пользоваться командами бота, подпишитесь на [канал](https://t.me/silentpower_V).\n\n"
            if REQUIRED_CHANNEL else "")
@@ -1187,7 +1809,7 @@ async def cmd_swear_top(message: types.Message):
         await message.answer("Команда работает только в групповых чатах.")
         return
 
-async def maybe_reply_with_deepseek(message: types.Message) -> None:
+async def maybe_reply_with_ai(message: types.Message, targets: list[dict] | None = None) -> None:
     if not message.from_user or message.from_user.is_bot:
         return
     if not (message.text or message.caption):
@@ -1207,17 +1829,31 @@ async def maybe_reply_with_deepseek(message: types.Message) -> None:
     if not await ensure_group_subscription(message):
         return
 
+    if replied_to_bot and is_echo_of_bot_message(message):
+        await send_echo_response(message)
+        return
+
+    if is_task_request(message):
+        await send_task_reject(message)
+        return
+
+    if targets is None:
+        targets = gather_targets_from_message(message)
+
     history_entries = get_chat_history_entries(message.chat.id)
-    reply_text = await generate_deepseek_reply(message.text or message.caption, history_entries)
+    chat_memories = db.get_chat_memories(message.chat.id, CHAT_MEMORY_CONTEXT_LIMIT)
+    user_memory_context = build_user_memory_context(message.chat.id, targets)
+    reply_text = await generate_ai_reply(message, history_entries, chat_memories, user_memory_context)
     if not reply_text:
         return
 
     try:
         await message.reply(reply_text)
     except Exception as exc:
-        logger.error(f"Не удалось отправить ответ DeepSeek: {exc}")
+        logger.error(f"Не удалось отправить ответ через Grok: {exc}")
 
 
+@dp.message((F.chat.type == "group") | (F.chat.type == "supergroup"))
 @dp.message((F.chat.type == "group") | (F.chat.type == "supergroup"))
 async def check_reply_block(message: types.Message):
     """Проверка сообщений на попытку связаться с пользователем, который ограничил ответы."""
@@ -1228,11 +1864,13 @@ async def check_reply_block(message: types.Message):
 
     await process_swear_stats(message)
 
-    await maybe_reply_with_deepseek(message)
-
-    replier_id = message.from_user.id
     record_user_profiles_from_message(message)
     targets = gather_targets_from_message(message)
+    schedule_memory_capture(message, targets)
+
+    await maybe_reply_with_ai(message, targets)
+
+    replier_id = message.from_user.id
 
     if not targets:
         return
@@ -1475,11 +2113,144 @@ async def help_menu(message: types.Message, state: FSMContext):
         "Показывает список всех блокировок в текущем чате.\n\n"
         "4️⃣ Топ маты / Топ матов\n"
         "Выводит рейтинг пользователей чата по количеству зафиксированных матов.\n\n"
-        "⚙️ Настройки в личных сообщениях:\n\n"
-        "• Глобальный автоответчик - текст по умолчанию для всех блокировок\n"
-        "• Тех.поддержка - связь с администраторами\n"
-        "• Помощь - это сообщение\n\n"
+        "⚙️ Настройки и ИИ в личных сообщениях:\n\n"
+        "• Глобальный автоответчик — текст по умолчанию для блокировок\n"
+        "• Стиль общения — восемь готовых режимов (токсик, фембой, клерк, гот, батя, аристократ, хулиган) или ваш кастом\n"
+        "• ИИ-агент — ответит, если упомянуть бота или написать ему в ответ, учитывает память чата\n"
+        "• Тех.поддержка — связь с администраторами\n"
+        "• Помощь — это сообщение\n\n"
         "⚠️ Важно: Бот должен быть администратором чата с правом удаления сообщений!",
+        reply_markup=get_main_keyboard()
+    )
+
+
+def build_personal_style_keyboard(current: str | None) -> InlineKeyboardMarkup:
+    buttons = []
+    for key, preset in AI_STYLE_PRESETS.items():
+        suffix = " ✅" if current == key else ""
+        buttons.append([
+            InlineKeyboardButton(text=f"{preset['title']}{suffix}", callback_data=f"style_me_{key}")
+        ])
+    custom_suffix = " ✅" if current == CUSTOM_STYLE_KEY else ""
+    buttons.append([
+        InlineKeyboardButton(text=f"📝 Свой стиль{custom_suffix}", callback_data="style_me_custom")
+    ])
+    if current:
+        buttons.append([
+            InlineKeyboardButton(text="Сбросить на стиль бота", callback_data="style_me_reset")
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def build_default_style_keyboard(current: str) -> InlineKeyboardMarkup:
+    buttons = []
+    for key, preset in AI_STYLE_PRESETS.items():
+        suffix = " ✅" if current == key else ""
+        buttons.append([
+            InlineKeyboardButton(text=f"{preset['title']}{suffix}", callback_data=f"style_default_{key}")
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+@dp.message(F.text == "🎭 Стиль общения")
+async def style_menu(message: types.Message):
+    if message.chat.type != "private":
+        return
+    if not await ensure_channel_subscription(message):
+        return
+
+    user_id = message.from_user.id
+    personal = get_user_style(user_id)
+    personal_prompt = get_user_custom_prompt(user_id) if personal == CUSTOM_STYLE_KEY else None
+    default_style = get_default_ai_style()
+    effective = personal or default_style
+    effective_title = AI_STYLE_PRESETS.get(effective, {"title": "Неизвестно"})["title"]
+    if personal == CUSTOM_STYLE_KEY:
+        snippet = (personal_prompt or "не задан").strip()
+        preview = (snippet[:120] + "…") if len(snippet) > 120 else snippet
+        status_text = f"Твой личный стиль: 📝 Свой.\nОписание: {preview}"
+    elif personal:
+        status_text = f"Твой личный стиль: {effective_title}"
+    else:
+        status_text = f"Ты используешь стиль бота: {effective_title}"
+
+    await message.answer(
+        "🎭 Настройка твоего стиля\n\n"
+        f"{status_text}.\nВыбери готовый вариант или нажми 'Свой стиль', чтобы описать характер.",
+        reply_markup=build_personal_style_keyboard(personal)
+    )
+
+    can_edit_global_style = (not ADMIN_ID) or (str(message.from_user.id) == str(ADMIN_ID))
+    if can_edit_global_style:
+        await message.answer(
+            "⚙️ Стиль по умолчанию для всех\n\n"
+            f"Сейчас выбран: {AI_STYLE_PRESETS[default_style]['title']}.",
+            reply_markup=build_default_style_keyboard(default_style)
+        )
+
+
+@dp.callback_query(F.data.startswith("style_"))
+async def change_style(callback: types.CallbackQuery, state: FSMContext):
+    data = callback.data
+    user_id = callback.from_user.id
+
+    if data == "style_me_reset":
+        reset_user_style(user_id)
+        await callback.message.edit_reply_markup(reply_markup=build_personal_style_keyboard(None))
+        await callback.answer("Личный стиль сброшен")
+        return
+
+    if data.startswith("style_me_"):
+        style_key = data.split("_", maxsplit=2)[2]
+        if style_key == "custom":
+            await callback.answer()
+            await state.set_state(BotStates.waiting_custom_style)
+            await callback.message.answer(
+                "📝 Опиши, как я должен разговаривать лично с тобой."
+                f" Минимум {CUSTOM_STYLE_MIN_LENGTH} символов, максимум {CUSTOM_STYLE_PROMPT_LIMIT}.\n"
+                "Команда /cancel отменяет настройку."
+            )
+            return
+        if style_key not in AI_STYLE_PRESETS:
+            await callback.answer("Неизвестный стиль")
+            return
+        set_user_style(user_id, style_key)
+        await callback.message.edit_reply_markup(reply_markup=build_personal_style_keyboard(style_key))
+        await callback.answer("Личный стиль обновлён")
+        return
+
+    if data.startswith("style_default_"):
+        can_edit_global_style = (not ADMIN_ID) or (str(user_id) == str(ADMIN_ID))
+        if not can_edit_global_style:
+            await callback.answer("Только для администратора", show_alert=True)
+            return
+        style_key = data.split("_", maxsplit=2)[2]
+        if style_key not in AI_STYLE_PRESETS:
+            await callback.answer("Неизвестный стиль")
+            return
+        set_default_ai_style(style_key)
+        await callback.message.edit_reply_markup(reply_markup=build_default_style_keyboard(style_key))
+        await callback.answer("Стиль бота обновлён")
+        return
+    if message.chat.type != "private":
+        await message.answer("Настройку стиля можно делать только в личке.")
+        return
+    if message.text and message.text.strip() == "/cancel":
+        await state.clear()
+        await message.answer("❌ Настройка кастомного стиля отменена.")
+        return
+
+    text = (message.text or "").strip()
+    is_valid, error = await validate_custom_style_prompt(text)
+    if not is_valid:
+        await message.answer(error)
+        return
+
+    set_user_custom_prompt(message.from_user.id, text)
+    set_user_style(message.from_user.id, CUSTOM_STYLE_KEY)
+    await state.clear()
+    await message.answer(
+        "✅ Кастомный стиль сохранён. Теперь я буду отвечать по твоим правилам.",
         reply_markup=get_main_keyboard()
     )
 
