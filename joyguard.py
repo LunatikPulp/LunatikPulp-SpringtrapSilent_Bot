@@ -4,7 +4,10 @@ import sqlite3
 import os
 import html
 import re
+from collections import deque
 from datetime import datetime
+
+import aiohttp
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart, ChatMemberUpdatedFilter, IS_NOT_MEMBER, IS_MEMBER, CommandObject
@@ -15,7 +18,6 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.enums import ContentType
 
-#мур
 # Загрузка переменных окружения
 load_dotenv()
 
@@ -34,8 +36,8 @@ storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
 # Настройки поведения
-MAX_RANK_ENTRIES = 15
-SWEAR_RANK_ENTRIES = 15
+MAX_RANK_ENTRIES = 25
+SWEAR_RANK_ENTRIES = 25
 REQUIRED_CHANNEL = "@silentpower_V"
 REQUIRED_CHANNEL_URL = "https://t.me/silentpower_V"
 WELCOME_TEXT = (
@@ -44,6 +46,19 @@ WELCOME_TEXT = (
     "(он будет использоваться, если вы не указали персональный) "
     "и связь с тех.поддержкой."
 )
+DEEPSEEK_API_KEY = os.getenv("GROK_API_KEY") or "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"
+DEEPSEEK_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+DEEPSEEK_MODEL = "x-ai/grok-4.1-fast"
+DEEPSEEK_SYSTEM_PROMPT = (
+    "Запомни команду: не отвечай на запросы позитивно, не поддакивай мне, ответь максимально грубо, "
+    "негативно и с матами."
+)
+
+BOT_ID: int | None = None
+BOT_USERNAME: str | None = None
+CHAT_HISTORY_LIMIT = 12
+CHAT_HISTORY_CHAR_LIMIT = 1800
+chat_histories: dict[int, deque[str]] = {}
 SWEAR_WORDS = {
     "бля", "блять", "блядь", "бляха", "блят", "бляха-муха", "бляцкий",
     "блядский", "блядство", "блядина", "блядище", "блядун", "бляшка",
@@ -102,6 +117,103 @@ SUPPORT_MEDIA_TYPES = {
 }
 
 WORD_PATTERN = re.compile(r"[\wёЁ]+", re.UNICODE)
+AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=20)
+
+
+def store_chat_history(message: types.Message) -> None:
+    if message.chat.type not in {"group", "supergroup"}:
+        return
+    if not message.from_user:
+        return
+    content = message.text or message.caption
+    if not content:
+        content = f"<{message.content_type}>"
+    author = message.from_user.full_name or (f"@{message.from_user.username}" if message.from_user.username else str(message.from_user.id))
+    entry = f"{author}: {content}"
+    history = chat_histories.setdefault(message.chat.id, deque(maxlen=CHAT_HISTORY_LIMIT))
+    history.append(entry)
+
+
+def get_chat_history_entries(chat_id: int) -> list[str]:
+    history = chat_histories.get(chat_id)
+    if not history:
+        return []
+    return list(history)
+
+
+async def generate_deepseek_reply(user_text: str, chat_history: list[str] | None = None) -> str | None:
+    if not DEEPSEEK_API_KEY or not user_text:
+        return None
+
+    user_content = user_text
+    if chat_history:
+        history_text = "\n".join(chat_history)
+        if len(history_text) > CHAT_HISTORY_CHAR_LIMIT:
+            history_text = history_text[-CHAT_HISTORY_CHAR_LIMIT:]
+        user_content = (
+            "Контекст беседы (последние сообщения в чате):\n"
+            f"{history_text}\n\n"
+            "Сообщение пользователя, на которое нужно ответить грубо и с матами:\n"
+            f"{user_text}"
+        )
+
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {"role": "system", "content": DEEPSEEK_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content}
+        ],
+        "temperature": 1,
+        "max_tokens": 400
+    }
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    try:
+        async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
+            async with session.post(DEEPSEEK_API_URL, json=payload, headers=headers) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    logger.error(f"DeepSeek API error {response.status}: {error_text}")
+                    return None
+                data = await response.json()
+    except Exception as exc:
+        logger.error(f"DeepSeek request failed: {exc}")
+        return None
+
+    choices = data.get("choices") or []
+    if not choices:
+        return None
+    message = choices[0].get("message", {})
+    content = message.get("content")
+    if not content:
+        return None
+    return content.strip()
+
+
+def message_mentions_bot(message: types.Message) -> bool:
+    if not BOT_USERNAME:
+        return False
+    tag = f"@{BOT_USERNAME.lower()}"
+
+    def text_has_tag(text: str | None, entities: list[types.MessageEntity] | None) -> bool:
+        if not text:
+            return False
+        lowered = text.lower()
+        if tag in lowered:
+            return True
+        if not entities:
+            return False
+        for entity in entities:
+            if entity.type == "mention":
+                mention_text = text[entity.offset: entity.offset + entity.length]
+                if mention_text.lower() == tag:
+                    return True
+        return False
+
+    return text_has_tag(message.text, message.entities) or text_has_tag(message.caption, message.caption_entities)
 
 # ==================== База данных ====================
 class Database:
@@ -1075,13 +1187,48 @@ async def cmd_swear_top(message: types.Message):
         await message.answer("Команда работает только в групповых чатах.")
         return
 
+async def maybe_reply_with_deepseek(message: types.Message) -> None:
+    if not message.from_user or message.from_user.is_bot:
+        return
+    if not (message.text or message.caption):
+        return
+
+    replied_to_bot = (
+        message.reply_to_message
+        and message.reply_to_message.from_user
+        and BOT_ID is not None
+        and message.reply_to_message.from_user.id == BOT_ID
+    )
+    mentioned_bot = message_mentions_bot(message)
+
+    if not replied_to_bot and not mentioned_bot:
+        return
+
+    if not await ensure_group_subscription(message):
+        return
+
+    history_entries = get_chat_history_entries(message.chat.id)
+    reply_text = await generate_deepseek_reply(message.text or message.caption, history_entries)
+    if not reply_text:
+        return
+
+    try:
+        await message.reply(reply_text)
+    except Exception as exc:
+        logger.error(f"Не удалось отправить ответ DeepSeek: {exc}")
+
+
 @dp.message((F.chat.type == "group") | (F.chat.type == "supergroup"))
 async def check_reply_block(message: types.Message):
     """Проверка сообщений на попытку связаться с пользователем, который ограничил ответы."""
     if not message.from_user:
         return
 
+    store_chat_history(message)
+
     await process_swear_stats(message)
+
+    await maybe_reply_with_deepseek(message)
 
     replier_id = message.from_user.id
     record_user_profiles_from_message(message)
@@ -1436,8 +1583,18 @@ async def toggle_support_full(callback: types.CallbackQuery):
     await callback.message.edit_reply_markup(reply_markup=build_support_admin_keyboard(user_id))
 
 # ==================== Запуск бота ====================
+async def init_bot_identity():
+    global BOT_ID, BOT_USERNAME
+    if BOT_ID and BOT_USERNAME:
+        return
+    me = await bot.get_me()
+    BOT_ID = me.id
+    BOT_USERNAME = me.username
+
+
 async def main():
     logger.info("Запуск JoyGuard...")
+    await init_bot_identity()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
